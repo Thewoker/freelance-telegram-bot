@@ -7,11 +7,15 @@
  * de keywords para descartar ruido, deduplica contra ejecuciones previas
  * (seen-projects.json) y notifica los proyectos nuevos por Telegram.
  *
- * Pensado para correr vía cron cada 5-10 minutos (ver README.md).
+ * Dos modos de ejecución (ver README.md):
+ *   - Servicio: bucle propio cada POLL_SECONDS, con health check HTTP. Es el
+ *     modo por defecto y el que se usa en Coolify.
+ *   - Una pasada: con RUN_ONCE=true hace un ciclo y termina, para cron.
  */
 
 const fs = require('fs');
 const path = require('path');
+const http = require('http');
 require('dotenv').config({ path: path.join(__dirname, '.env') });
 
 const {
@@ -23,9 +27,13 @@ const {
 
 const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID;
-const SEEN_FILE = path.join(__dirname, 'seen-projects.json');
+// En Docker apunta al volumen persistente; en local, al archivo de siempre.
+const SEEN_FILE = process.env.STATE_PATH || path.join(__dirname, 'seen-projects.json');
 const API_URL = 'https://www.freelancer.com/api/projects/0.1/projects/active/';
 const MAX_SEEN_IDS = 3000;
+const POLL_SECONDS = Number(process.env.POLL_SECONDS) || 300;
+const RUN_ONCE = /^(1|true|yes|on)$/i.test(process.env.RUN_ONCE || '');
+const PORT = Number(process.env.PORT) || 3000;
 
 if (!TELEGRAM_BOT_TOKEN || !TELEGRAM_CHAT_ID) {
   console.error('Faltan TELEGRAM_BOT_TOKEN o TELEGRAM_CHAT_ID en el .env');
@@ -43,6 +51,7 @@ function loadSeen() {
 
 function saveSeen(seenSet) {
   const arr = Array.from(seenSet).slice(-MAX_SEEN_IDS);
+  fs.mkdirSync(path.dirname(SEEN_FILE), { recursive: true });
   fs.writeFileSync(SEEN_FILE, JSON.stringify(arr));
 }
 
@@ -115,21 +124,14 @@ async function sendTelegram(message) {
   return true;
 }
 
-async function main() {
+async function runCycle() {
   const seen = loadSeen();
 
-  let data;
-  try {
-    const res = await fetch(buildUrl());
-    data = await res.json();
-  } catch (err) {
-    console.error('Error consultando la API de Freelancer:', err.message);
-    process.exit(1);
-  }
+  const res = await fetch(buildUrl(), { signal: AbortSignal.timeout(20000) });
+  const data = await res.json();
 
   if (data.status !== 'success') {
-    console.error('Respuesta inesperada de la API:', JSON.stringify(data).slice(0, 300));
-    process.exit(1);
+    throw new Error('Respuesta inesperada de la API: ' + JSON.stringify(data).slice(0, 300));
   }
 
   const projects = data.result.projects || [];
@@ -160,6 +162,58 @@ async function main() {
     `[${new Date().toISOString()}] ${projects.length} revisados, ` +
     `${newCount} notificados, ${blockedCount} descartados por blocklist.`
   );
+  return { revisados: projects.length, notificados: newCount, descartados: blockedCount };
 }
 
-main();
+// Coolify necesita un endpoint que responda para dar el contenedor por sano.
+function startHealthServer(status) {
+  http
+    .createServer((req, res) => {
+      if (req.url === '/health' || req.url === '/') {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify(status, null, 2));
+        return;
+      }
+      res.writeHead(404).end();
+    })
+    .listen(PORT, () => console.log(`Health check escuchando en el puerto ${PORT}.`));
+}
+
+async function main() {
+  if (RUN_ONCE) {
+    await runCycle();
+    return;
+  }
+
+  const status = {
+    ok: true,
+    startedAt: new Date().toISOString(),
+    lastRunAt: null,
+    lastError: null,
+    ciclos: 0,
+    notificados: 0,
+  };
+  startHealthServer(status);
+  console.log(`Modo servicio: un ciclo cada ${POLL_SECONDS}s.`);
+
+  for (;;) {
+    try {
+      const r = await runCycle();
+      status.notificados += r.notificados;
+      status.lastError = null;
+    } catch (err) {
+      // Un fallo de red o de la API no debe tumbar el servicio: se reintenta
+      // en el ciclo siguiente y queda registrado en /health.
+      status.lastError = err.message;
+      console.error('Ciclo fallido:', err.message);
+    }
+    status.ciclos++;
+    status.lastRunAt = new Date().toISOString();
+    await new Promise((r) => setTimeout(r, POLL_SECONDS * 1000));
+  }
+}
+
+main().catch((err) => {
+  console.error(err.message);
+  process.exit(1);
+});
