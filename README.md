@@ -58,6 +58,7 @@ solo notifica lo nuevo.
 | `RUN_ONCE` | false | Si es true, un solo ciclo y termina. |
 | `STATE_PATH` | ./seen-projects.json | Archivo de IDs ya notificados. |
 | `PORT` | 3000 | Puerto del health check. |
+| `FREELANCER_OAUTH_TOKEN` | vacío | Opcional. El endpoint es público; solo sube el límite por IP. |
 
 ## Docker
 
@@ -108,7 +109,8 @@ GET https://www.freelancer.com/api/projects/0.1/jobs/
 
 ## Notas
 
-- El endpoint es público, no requiere API key para lectura.
+- El endpoint es público, no requiere API key para lectura. Con un ciclo cada
+  5 minutos son ~288 consultas por día, muy lejos del rate limit.
 - `job_categories[]` y `jobs[]` funcionan como OR entre sí — cualquier
   proyecto que matchee alguno de los IDs configurados aparece. Por eso el
   filtro de `BLOCKLIST_KEYWORDS` es importante como segunda capa.

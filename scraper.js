@@ -42,6 +42,10 @@ function cleanEnv(name) {
 
 const TELEGRAM_BOT_TOKEN = cleanEnv('TELEGRAM_BOT_TOKEN');
 const TELEGRAM_CHAT_ID = cleanEnv('TELEGRAM_CHAT_ID');
+// Opcional: el endpoint de proyectos activos es publico y no lo necesita. Solo
+// sirve si algun dia el volumen de consultas creciera lo suficiente como para
+// rozar el rate limit por IP.
+const FREELANCER_OAUTH_TOKEN = cleanEnv('FREELANCER_OAUTH_TOKEN') || '';
 // En Docker apunta al volumen persistente; en local, al archivo de siempre.
 const SEEN_FILE = process.env.STATE_PATH || path.join(__dirname, 'seen-projects.json');
 const API_URL = 'https://www.freelancer.com/api/projects/0.1/projects/active/';
@@ -142,7 +146,10 @@ async function sendTelegram(message) {
 async function runCycle() {
   const seen = loadSeen();
 
-  const res = await fetch(buildUrl(), { signal: AbortSignal.timeout(20000) });
+  const headers = { accept: 'application/json' };
+  if (FREELANCER_OAUTH_TOKEN) headers['freelancer-oauth-v1'] = FREELANCER_OAUTH_TOKEN;
+
+  const res = await fetch(buildUrl(), { headers, signal: AbortSignal.timeout(20000) });
   const data = await res.json();
 
   if (data.status !== 'success') {
