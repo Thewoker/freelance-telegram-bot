@@ -31,8 +31,17 @@ const {
   BLOCKLIST_KEYWORDS,
 } = require('./config');
 
-const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
-const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID;
+// Los paneles de despliegue suelen guardar el valor tal cual se pega, con
+// comillas o espacios incluidos. Sin limpiarlos, la URL de la API queda mal
+// formada y Telegram responde 404 sin explicar por que.
+function cleanEnv(name) {
+  const raw = process.env[name];
+  if (!raw) return raw;
+  return raw.trim().replace(/^['"]|['"]$/g, '').trim();
+}
+
+const TELEGRAM_BOT_TOKEN = cleanEnv('TELEGRAM_BOT_TOKEN');
+const TELEGRAM_CHAT_ID = cleanEnv('TELEGRAM_CHAT_ID');
 // En Docker apunta al volumen persistente; en local, al archivo de siempre.
 const SEEN_FILE = process.env.STATE_PATH || path.join(__dirname, 'seen-projects.json');
 const API_URL = 'https://www.freelancer.com/api/projects/0.1/projects/active/';
@@ -185,7 +194,26 @@ function startHealthServer(status) {
     .listen(PORT, () => console.log(`Health check escuchando en el puerto ${PORT}.`));
 }
 
+// Falla al arrancar si el token no sirve, en vez de descubrirlo despues de
+// cincuenta errores de envio con el servicio corriendo en falso.
+async function checkToken() {
+  const res = await fetch(`https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/getMe`, {
+    signal: AbortSignal.timeout(15000),
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!data.ok) {
+    throw new Error(
+      `TELEGRAM_BOT_TOKEN invalido (HTTP ${res.status}: ${data.description || 'sin detalle'}). ` +
+      `Longitud recibida: ${TELEGRAM_BOT_TOKEN.length} caracteres. ` +
+      `Revisa que no tenga comillas ni espacios y que no este revocado.`
+    );
+  }
+  console.log(`Bot @${data.result.username} autenticado. Destino: ${TELEGRAM_CHAT_ID}.`);
+}
+
 async function main() {
+  await checkToken();
+
   if (RUN_ONCE) {
     await runCycle();
     return;
