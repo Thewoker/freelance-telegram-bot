@@ -4,12 +4,14 @@
   "description": "Notificador de proyectos nuevos de Freelancer.com por Telegram",
   "main": "scraper.js",
   "scripts": {
-    "start": "node scraper.js"
+    "start": "node scraper.js",
+    "once": "RUN_ONCE=true node scraper.js"
   },
-  "dependencies": {
-    "dotenv": "^16.4.5"
-  },
+  "dependencies": {},
   "engines": {
     "node": ">=18"
+  },
+  "optionalDependencies": {
+    "dotenv": "^16.4.5"
   }
 }

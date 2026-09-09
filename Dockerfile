@@ -3,10 +3,10 @@ FROM node:22-alpine
 ENV NODE_ENV=production
 WORKDIR /app
 
-COPY package.json package-lock.json ./
-RUN npm ci --omit=dev
-
-COPY scraper.js config.js ./
+# El scraper no necesita dependencias en runtime: dotenv solo se usa en local
+# y el require es opcional. Sin npm install, el build no depende del registro
+# de npm y no puede fallar por rate limiting.
+COPY package.json scraper.js config.js ./
 
 # El archivo de proyectos ya vistos vive en un volumen: sin el, cada redeploy
 # volveria a notificar todo lo que ya se publico.

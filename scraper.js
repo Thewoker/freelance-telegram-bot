@@ -16,7 +16,13 @@
 const fs = require('fs');
 const path = require('path');
 const http = require('http');
-require('dotenv').config({ path: path.join(__dirname, '.env') });
+// En local carga el .env; en el contenedor las variables las inyecta Coolify y
+// dotenv no esta instalado, por eso el require es opcional.
+try {
+  require('dotenv').config({ path: path.join(__dirname, '.env') });
+} catch {
+  /* sin dotenv: se usan las variables del entorno tal cual */
+}
 
 const {
   JOB_CATEGORIES,
