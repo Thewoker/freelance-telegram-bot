@@ -51,6 +51,12 @@ const SEEN_FILE = process.env.STATE_PATH || path.join(__dirname, 'seen-projects.
 const API_URL = 'https://www.freelancer.com/api/projects/0.1/projects/active/';
 const MAX_SEEN_IDS = 3000;
 const POLL_SECONDS = Number(process.env.POLL_SECONDS) || 300;
+// Limite de Telegram para un mensaje; se deja margen por el encabezado.
+const TELEGRAM_MAX = 3900;
+// Desde cuantos proyectos conviene agrupar en un solo mensaje.
+const AGRUPAR_DESDE = Number(process.env.AGRUPAR_DESDE) || 3;
+// Imprime los mensajes en consola en vez de enviarlos. Para probar filtros.
+const DRY_RUN = /^(1|true|yes|on)$/i.test(process.env.DRY_RUN || '');
 const RUN_ONCE = /^(1|true|yes|on)$/i.test(process.env.RUN_ONCE || '');
 const PORT = Number(process.env.PORT) || 3000;
 
@@ -111,8 +117,17 @@ function escapeMarkdown(text) {
   return String(text).replace(/([_*\[\]()~`>#+\-=|{}.!])/g, '\\$1');
 }
 
+/* Dentro de un enlace de MarkdownV2 solo hay que escapar el parentesis que
+ * cerraria la URL antes de tiempo. */
+function escapeUrl(url) {
+  return String(url).replace(/([)\\])/g, '\\$1');
+}
+
+function projectUrl(project) {
+  return `https://www.freelancer.com/projects/${project.seo_url}`;
+}
+
 function formatMessage(project) {
-  const url = `https://www.freelancer.com/projects/${project.seo_url}`;
   const bids = (project.bid_stats && project.bid_stats.bid_count) || 0;
   const bidFlag = bids <= 5 ? ' 🔥 pocas propuestas' : '';
   return (
@@ -120,27 +135,90 @@ function formatMessage(project) {
     `💰 ${escapeMarkdown(formatBudget(project))}\n` +
     `📨 ${bids} propuestas${bidFlag}\n` +
     `🌐 ${project.language.toUpperCase()}\n` +
-    `${escapeMarkdown(url)}`
+    `${escapeMarkdown(projectUrl(project))}`
   );
 }
 
+/* Version compacta para cuando llegan varios de golpe: el titulo es el enlace,
+ * asi entra todo en pocas lineas. */
+function formatEntry(project) {
+  const bids = (project.bid_stats && project.bid_stats.bid_count) || 0;
+  const bidFlag = bids <= 5 ? ' 🔥' : '';
+  return (
+    `• [${escapeMarkdown(project.title)}](${escapeUrl(projectUrl(project))})\n` +
+    `  ${escapeMarkdown(formatBudget(project))} · ${bids} propuestas${bidFlag}` +
+    ` · ${project.language.toUpperCase()}`
+  );
+}
+
+/* Arma el resumen y lo parte si no entra en un mensaje de Telegram. Devuelve
+ * pares de mensaje y los proyectos que incluye, para poder marcar como vistos
+ * solo los que se enviaron bien. */
+function buildDigest(projects) {
+  const total = projects.length;
+  const entradas = projects.map((p) => ({ texto: formatEntry(p), project: p }));
+
+  const mensajes = [];
+  let actual = null;
+
+  for (const { texto, project } of entradas) {
+    const encabezado = () =>
+      mensajes.length === 0
+        ? `🆕 *${total} proyectos nuevos*`
+        : `🆕 *${total} proyectos nuevos* \\(continuacion\\)`;
+
+    if (!actual) actual = { partes: [encabezado()], projects: [] };
+
+    const largoSiSumo = actual.partes.join('\n\n').length + texto.length + 2;
+    if (largoSiSumo > TELEGRAM_MAX) {
+      mensajes.push(actual);
+      actual = { partes: [encabezado()], projects: [] };
+    }
+
+    actual.partes.push(texto);
+    actual.projects.push(project);
+  }
+
+  if (actual) mensajes.push(actual);
+  return mensajes.map((m) => ({ texto: m.partes.join('\n\n'), projects: m.projects }));
+}
+
 async function sendTelegram(message) {
+  if (DRY_RUN) {
+    console.log(`\n--- mensaje (${message.length} caracteres) ---\n${message}\n`);
+    return true;
+  }
+
   const url = `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`;
-  const res = await fetch(url, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      chat_id: TELEGRAM_CHAT_ID,
-      text: message,
-      parse_mode: 'MarkdownV2',
-      disable_web_page_preview: false,
-    }),
-  });
-  if (!res.ok) {
-    console.error('Error enviando a Telegram:', res.status, await res.text());
+
+  const enviar = (cuerpo) =>
+    fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(cuerpo),
+    });
+
+  const base = { chat_id: TELEGRAM_CHAT_ID, disable_web_page_preview: false };
+  const res = await enviar({ ...base, text: message, parse_mode: 'MarkdownV2' });
+  if (res.ok) return true;
+
+  const detalle = await res.text();
+
+  // Un solo caracter mal escapado tira todo el mensaje. Antes que perder los
+  // avisos, se reenvia sin formato: se ven las barras de escape pero llega.
+  if (res.status === 400 && /can't parse entities/i.test(detalle)) {
+    console.error('Telegram rechazo el formato, reenviando sin formato:', detalle.slice(0, 200));
+    const plano = message
+      .replace(/\[([^\]]+)\]\(([^)]+)\)/g, '$1\n  $2')
+      .replace(/\\([_*[\]()~`>#+\-=|{}.!])/g, '$1');
+    const reintento = await enviar({ ...base, text: plano });
+    if (reintento.ok) return true;
+    console.error('Tampoco salio sin formato:', reintento.status, await reintento.text());
     return false;
   }
-  return true;
+
+  console.error('Error enviando a Telegram:', res.status, detalle);
+  return false;
 }
 
 async function runCycle() {
@@ -160,6 +238,9 @@ async function runCycle() {
   let newCount = 0;
   let blockedCount = 0;
 
+  // Primero se separa el trigo de la paja, y recien despues se envia: asi se
+  // sabe cuantos son y se puede decidir si van juntos o por separado.
+  const nuevos = [];
   for (const project of projects) {
     const id = String(project.id);
     if (seen.has(id)) continue;
@@ -169,13 +250,24 @@ async function runCycle() {
       seen.add(id); // los bloqueados sí se marcan, no queremos re-evaluarlos
       continue;
     }
+    nuevos.push(project);
+  }
 
-    const ok = await sendTelegram(formatMessage(project));
+  // Los mas viejos primero, para que el canal quede en orden cronologico.
+  nuevos.sort((a, b) => (a.time_submitted || 0) - (b.time_submitted || 0));
+
+  const envios =
+    nuevos.length >= AGRUPAR_DESDE
+      ? buildDigest(nuevos)
+      : nuevos.map((p) => ({ texto: formatMessage(p), projects: [p] }));
+
+  for (const envio of envios) {
+    const ok = await sendTelegram(envio.texto);
     if (ok) {
-      seen.add(id);
-      newCount++;
+      // Si falla, esos proyectos NO se marcan y se reintentan en la proxima corrida.
+      envio.projects.forEach((p) => seen.add(String(p.id)));
+      newCount += envio.projects.length;
     }
-    // si falla el envío, NO se marca como visto -> se reintenta en la próxima corrida
     await new Promise((r) => setTimeout(r, 500)); // no saturar la API de Telegram
   }
 
@@ -204,6 +296,11 @@ function startHealthServer(status) {
 // Falla al arrancar si el token no sirve, en vez de descubrirlo despues de
 // cincuenta errores de envio con el servicio corriendo en falso.
 async function checkToken() {
+  if (DRY_RUN) {
+    console.log('DRY_RUN activo: no se envia nada a Telegram.');
+    return;
+  }
+
   const res = await fetch(`https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/getMe`, {
     signal: AbortSignal.timeout(15000),
   });

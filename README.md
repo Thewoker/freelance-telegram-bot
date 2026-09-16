@@ -56,6 +56,8 @@ solo notifica lo nuevo.
 | `TELEGRAM_CHAT_ID` | — | Canal o grupo destino. Obligatorio. |
 | `POLL_SECONDS` | 300 | Segundos entre ciclos en modo servicio. |
 | `RUN_ONCE` | false | Si es true, un solo ciclo y termina. |
+| `AGRUPAR_DESDE` | 3 | A partir de cuantos proyectos nuevos se agrupan en un solo mensaje. |
+| `DRY_RUN` | false | Imprime los mensajes en consola en vez de enviarlos. Para probar filtros. |
 | `STATE_PATH` | ./seen-projects.json | Archivo de IDs ya notificados. |
 | `PORT` | 3000 | Puerto del health check. |
 | `FREELANCER_OAUTH_TOKEN` | vacío | Opcional. El endpoint es público; solo sube el límite por IP. |
@@ -89,6 +91,24 @@ Agregar (corre cada 10 minutos):
 
 Con `RUN_ONCE=true` en el `.env` para que no quede un proceso colgado.
 Ajustá `/usr/bin/node` según el resultado de `which node`.
+
+## Agrupacion de mensajes
+
+Cuando en un ciclo aparecen `AGRUPAR_DESDE` proyectos o mas, se envian juntos en
+un resumen en vez de uno por mensaje. Cada entrada queda como un enlace con el
+presupuesto, las propuestas y el idioma. Si el resumen supera el limite de
+Telegram se parte en varios mensajes.
+
+Con uno o dos proyectos se mantiene el formato detallado de siempre.
+
+Si Telegram rechaza el formato por un caracter mal escapado, el mensaje se
+reenvia sin formato en lugar de perderse.
+
+Para ver como quedarian los mensajes sin enviar nada:
+
+```bash
+DRY_RUN=true RUN_ONCE=true node scraper.js
+```
 
 ## Ajustar filtros
 
